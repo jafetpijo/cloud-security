@@ -7,7 +7,6 @@ from collections import Counter
 # 1. CONFIGURACIÓN
 # ==========================================
 RUTA_LOGS = "logs/servidor_aws.log"
-RUTA_REPORTE = "reportes/resumen_diario_{fecha_hoy}.txt"
 CARPETA_REPORTES = "reportes"
 
 
@@ -119,21 +118,15 @@ def mostrar_dashboard(estadisticas, porcentajes):
     print("=" * 60 + "\n")
 
 
-def generar_reporte(estadisticas, porcentajes, ruta_reporte):
+def generar_reporte(estadisticas, porcentajes):
     crear_carpeta_reportes()
-    
-    fecha_hoy = datetime.now().strftime("%Y-%m-%d")
-    ruta_final = ruta_reporte.format(fecha_hoy=fecha_hoy)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     try:
-        with open(ruta_final, "w") as reporte:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
+        with open(f"{CARPETA_REPORTES}/resumen_diario.log", "a") as reporte:
             reporte.write("=" * 60 + "\n")
-            reporte.write("RESUMEN DIARIO DE SEGURIDAD\n")
+            reporte.write(f"[{timestamp}] RESUMEN DIARIO DE SEGURIDAD\n")
             reporte.write("=" * 60 + "\n\n")
-            
-            reporte.write(f"Fecha: {timestamp}\n\n")
             
             reporte.write(f"EVENTOS TOTALES: {estadisticas['total_eventos']}\n\n")
             
@@ -157,9 +150,9 @@ def generar_reporte(estadisticas, porcentajes, ruta_reporte):
                 for usuario in sorted(estadisticas['usuarios_unicos']):
                     reporte.write(f"  - {usuario}\n")
             
-            reporte.write("\n" + "=" * 60 + "\n")
+            reporte.write("\n" + "=" * 60 + "\n\n")
         
-        print(f"✅ Reporte guardado en: {ruta_final}\n")
+        print(f"✅ Reporte guardado en: {CARPETA_REPORTES}/resumen_diario.log\n")
         return True
     
     except Exception as e:
@@ -183,7 +176,7 @@ def ejecutar_resumen():
     
     mostrar_dashboard(estadisticas, porcentajes)
     
-    generar_reporte(estadisticas, porcentajes, RUTA_REPORTE)
+    generar_reporte(estadisticas, porcentajes)
     
     return True
 
