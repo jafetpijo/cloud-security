@@ -77,7 +77,7 @@ def ejecutar_analisis(ruta_logs=None):
     print("\n🔍 Iniciando análisis de errores por IP...\n")
     if not validar_archivo_logs(ruta):
         return False
-    ips, errores_totales = leer_errores_por_ip(ruta)  # <- AQUÍ ESTABA EL BUG 2
+    ips, errores_totales = leer_errores_por_ip(ruta)  
     if ips is None:
         return False
     if errores_totales == 0:
