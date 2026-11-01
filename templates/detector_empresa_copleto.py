@@ -69,5 +69,11 @@ def analizar_seguridad(ip_usuario, ruta_target=RUTA_A_MONITOREAR):
 # 4. PRUEBA
 # ==========================================
 if __name__ == "__main__":
+    if __name__ == "__main__":
+    print("TEST 1: IP autorizada")
     analizar_seguridad("192.168.1.50")
+    
+    print("\n" + "="*30 + "\n")
+    
+    print("TEST 2: IP atacante")
     analizar_seguridad("10.0.0.99")
