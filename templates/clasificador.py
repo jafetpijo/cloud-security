@@ -55,7 +55,7 @@ def clasificar_eventos(ruta_logs):
         print(f"❌ Error: No se encontró '{ruta_logs}'")
         return None, None, None
     except PermissionError:
-        print(f"❌ Error: Sin permisos para leer '{ruta_logs}'")
+        print("❌ Error: Sin permisos de lectura o escritura")
         return None, None, None
 
 def mostrar_dashboard_consola(contadores):
