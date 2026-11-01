@@ -1,135 +1,110 @@
 #!/usr/bin/env python3
 import os
-from collections import defaultdict
+import re
+import argparse
 from datetime import datetime
 
-# ==========================================
-# 1. CONFIGURACIÓN
-# ==========================================
 RUTA_LOGS = "logs/servidor_aws.log"
 CARPETA_REPORTES = "reportes"
+ARCHIVO_BASELINE = "reportes/ips_conocidas.txt"
 
-
-# ==========================================
-# 2. FUNCIONES AUXILIARES
-# ==========================================
 def crear_carpeta_reportes():
     os.makedirs(CARPETA_REPORTES, exist_ok=True)
 
-
 def validar_archivo_logs(ruta):
     if not os.path.exists(ruta):
-        print(f"❌ Error: No se encontró '{ruta}'")
+        print(f"❌ No se encontró '{ruta}'")
         return False
-    
     if os.path.getsize(ruta) == 0:
-        print(f"⚠️  Archivo vacío: '{ruta}'")
+        print(f"⚠️ Archivo vacío")
         return False
-    
     return True
 
+def cargar_baseline():
+    if not os.path.exists(ARCHIVO_BASELINE):
+        return set()
+    with open(ARCHIVO_BASELINE, "r") as f:
+        return set(line.strip() for line in f if line.strip())
+
+def guardar_baseline(ips):
+    with open(ARCHIVO_BASELINE, "a") as f:
+        for ip in ips:
+            f.write(f"{ip}\n")
 
 def leer_accesos_nuevos(ruta_logs):
-    ips_por_usuario = defaultdict(set)
     accesos_nuevos = []
+    ips_nuevas_para_guardar = set()
     
+    baseline = cargar_baseline()
+    patron = re.compile(r'(?:usuario|user)=([a-zA-Z0-9_.-]+).*?ip=([0-9.]+)', re.I)
+
     try:
-        with open(ruta_logs, "r") as archivo:
+        with open(ruta_logs, "r", errors="ignore") as archivo:
             for linea in archivo:
                 if "LOGIN" in linea.upper() and "OK" in linea.upper():
-                    try:
-                        if "usuario=" in linea and "ip=" in linea:
-                            usuario = linea.split("usuario=")[1].split()[0]
-                            ip = linea.split("ip=")[1].split()[0]
-                            
-                            if ip not in ips_por_usuario[usuario]:
-                                ips_por_usuario[usuario].add(ip)
-                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                accesos_nuevos.append((usuario, ip, timestamp, linea))
-                    
-                    except (IndexError, ValueError):
-                        pass
-    
+                    m = patron.search(linea)
+                    if m:
+                        usuario, ip = m.groups()
+                        if ip not in baseline:
+                            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            accesos_nuevos.append((usuario, ip, ts, linea.strip()))
+                            ips_nuevas_para_guardar.add(ip)
+                            baseline.add(ip) # para no repetir en mismo archivo
     except FileNotFoundError:
-        print(f"❌ Error: No se encontró '{ruta_logs}'")
-        return None
-    except PermissionError:
-        print(f"❌ Error: Sin permisos para leer '{ruta_logs}'")
-        return None
-    
-    return accesos_nuevos
+        print(f"❌ No se encontró '{ruta_logs}'")
+        return None, None
+    return accesos_nuevos, ips_nuevas_para_guardar
 
-
-def mostrar_dashboard_consola(accesos_nuevos):
-    print("\n" + "=" * 60)
+def mostrar_dashboard(accesos):
+    print("\n" + "="*60)
     print("📊 ACCESOS DESDE IPs NUEVAS")
-    print("=" * 60 + "\n")
+    print("="*60 + "\n")
+    usuarios = {}
+    for u, ip, _, _ in accesos:
+        usuarios.setdefault(u, []).append(ip)
     
-    usuarios_afectados = {}
-    for usuario, ip, timestamp, _ in accesos_nuevos:
-        if usuario not in usuarios_afectados:
-            usuarios_afectados[usuario] = []
-        usuarios_afectados[usuario].append(ip)
-    
-    for usuario, ips in sorted(usuarios_afectados.items()):
-        print(f"👤 {usuario}")
+    for u, ips in usuarios.items():
+        print(f"👤 {u}")
         for ip in ips:
-            print(f"   └─ 🌐 {ip}")
+            print(f"   └─ 🌐 {ip} -> NUEVA 🚨")
     
-    print(f"\n⚠️  Total de accesos anómalos: {len(accesos_nuevos)}\n")
-    print("=" * 60 + "\n")
+    print(f"\n⚠️ Total anómalos: {len(accesos)}\n" + "="*60 + "\n")
 
-
-def generar_reporte(accesos_nuevos):
+def generar_reporte(accesos):
     crear_carpeta_reportes()
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    try:
-        with open(f"{CARPETA_REPORTES}/accesos_anomalos.log", "a") as reporte:
-            reporte.write("=" * 60 + "\n")
-            reporte.write(f"[{timestamp}] DETECCIÓN DE ACCESOS DESDE IPs NUEVAS\n")
-            reporte.write("=" * 60 + "\n\n")
-            
-            for usuario, ip, ts, evento in accesos_nuevos:
-                reporte.write(f"[{ts}] [ANOMALÍA] Usuario: {usuario} | IP: {ip}\n")
-            
-            reporte.write("\n" + "=" * 60 + "\n\n")
-        
-        return True
-    
-    except Exception as e:
-        print(f"❌ Error al generar reporte: {e}")
-        return False
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ruta_out = f"{CARPETA_REPORTES}/accesos_anomalos.log"
+    with open(ruta_out, "a") as r:
+        r.write(f"\n[{ts}] DETECCIÓN IPs NUEVAS - Total: {len(accesos)}\n")
+        for u, ip, t, _ in accesos:
+            r.write(f"[{t}] [ANOMALÍA] Usuario: {u} | IP: {ip}\n")
+    print(f"📝 Reporte guardado en: {ruta_out}\n")
 
-
-# ==========================================
-# 3. FLUJO PRINCIPAL
-# ==========================================
-def ejecutar_deteccion():
-    print("\n🔍 Iniciando detección de accesos desde IPs nuevas...\n")
-    
-    if not validar_archivo_logs(RUTA_LOGS):
+def ejecutar_deteccion(ruta_logs, aprender=False):
+    print("\n🔍 Iniciando detección IPs nuevas...\n")
+    if not validar_archivo_logs(ruta_logs):
         return False
     
-    accesos_nuevos = leer_accesos_nuevos(RUTA_LOGS)
-    if accesos_nuevos is None:
+    accesos, nuevas = leer_accesos_nuevos(ruta_logs)
+    if accesos is None:
         return False
-    
-    if len(accesos_nuevos) == 0:
-        print("✅ Sin accesos anómalos detectados.\n")
+    if not accesos:
+        print("✅ Sin accesos desde IPs nuevas.\n")
         return True
     
-    mostrar_dashboard_consola(accesos_nuevos)
+    mostrar_dashboard(accesos)
+    generar_reporte(accesos)
     
-    if generar_reporte(accesos_nuevos):
-        print(f"📝 Reporte guardado en: {CARPETA_REPORTES}/accesos_anomalos.log\n")
-        return True
-    
-    return False
+    if aprender:
+        guardar_baseline(nuevas)
+        print(f"🧠 Baseline actualizado con {len(nuevas)} IPs nuevas\n")
+    else:
+        print("💡 Tip: Usa --aprender para agregar estas IPs como conocidas\n")
+    return True
 
-
-# ==========================================
-# 4. EJECUCIÓN
-# ==========================================
 if __name__ == "__main__":
-    ejecutar_deteccion()
+    parser = argparse.ArgumentParser(description="Detector de IPs nuevas")
+    parser.add_argument("--log", default=RUTA_LOGS)
+    parser.add_argument("--aprender", action="store_true", help="Agregar IPs nuevas al baseline")
+    args = parser.parse_args()
+    ejecutar_deteccion(args.log, args.aprender)
