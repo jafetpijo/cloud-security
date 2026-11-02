@@ -6,6 +6,8 @@ from collections import Counter
 from datetime import datetime
 
 RUTA_LOGS = "logs/servidor_aws.log"
+# Note: Regex doesn't validate IP ranges (e.g., 999.999.999.999). 
+# For production, use ipaddress module to validate.
 IP_REGEX = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 CARPETA_REPORTES = "reportes"
 
@@ -68,7 +70,7 @@ def generar_reporte(ips, errores_totales):
                 reporte.write(f"  {ip}: {cantidad} errores ({porcentaje:.1f}%)\n")
             reporte.write("\n" + "=" * 60 + "\n\n")
         return True
-    except Exception as e:
+    except (PermissionError, OSError) as e:
         print(f"❌ Error al generar reporte: {e}")
         return False
 
@@ -77,7 +79,7 @@ def ejecutar_analisis(ruta_logs=None):
     print("\n🔍 Iniciando análisis de errores por IP...\n")
     if not validar_archivo_logs(ruta):
         return False
-    ips, errores_totales = leer_errores_por_ip(ruta)  
+    ips, errores_totales = leer_errores_por_ip(ruta)
     if ips is None:
         return False
     if errores_totales == 0:
