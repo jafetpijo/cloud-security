@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import re
 import argparse
 from datetime import datetime
 
@@ -18,6 +19,13 @@ CARPETA_ALERTAS = "alertas"
 def crear_carpeta_alertas():
     os.makedirs(CARPETA_ALERTAS, exist_ok=True)
 
+def validar_ip(ip):
+    patron = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
+    return bool(patron.match(ip))
+
+def imprimir_separador():
+    print("=" * 60 + "\n")
+
 def registrar_alerta(ip_usuario, mb_totales, tipo_alerta, ruta):
     crear_carpeta_alertas()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -34,23 +42,27 @@ def registrar_alerta(ip_usuario, mb_totales, tipo_alerta, ruta):
         return None
 
 def calcular_volumen_datos(ruta_target):
-    bytes_totales = 0
+    """Returns the size in MB, or None if it could not be calculated."""
     if not os.path.exists(ruta_target):
-        print(f"⚠️ La ruta '{ruta_target}' no existe. Creándola para prueba...")
-        os.makedirs(ruta_target, exist_ok=True)
-        return 0
+        print(f"❌ La ruta '{ruta_target}' no existe.")
+        print("💡 Créala o usa --ruta otra_carpeta")
+        return None
 
+    bytes_totales = 0
     try:
-        for raiz, _, archivos in os.walk(ruta_target):
+        for raiz, _, archivos in os.walk(ruta_target, followlinks=False):
             for archivo in archivos:
                 try:
                     ruta_completa = os.path.join(raiz, archivo)
+                    # Skip symlinks to avoid loops and double counting
+                    if os.path.islink(ruta_completa):
+                        continue
                     bytes_totales += os.path.getsize(ruta_completa)
-                except (FileNotFoundError, PermissionError):
+                except (FileNotFoundError, PermissionError, OSError):
                     continue
     except PermissionError as e:
         print(f"❌ Error de permisos en '{ruta_target}': {e}")
-        return 0
+        return None
 
     return bytes_totales / (1024 * 1024)
 
@@ -58,27 +70,45 @@ def calcular_volumen_datos(ruta_target):
 # 3. DETECTOR LOGIC (TWO THRESHOLDS)
 # ==========================================
 def analizar_seguridad(ip_usuario, ruta_target=RUTA_A_MONITOREAR):
-    print("\n--- INICIANDO ESCANEO DE SEGURIDAD ---\n")
-    mb_totales = calcular_volumen_datos(ruta_target)
-    print(f"IP: {ip_usuario} | Volumen: {mb_totales:.2f} MB\n")
+    print("\n" + "=" * 60)
+    print("🛡️  ESCANEO DE EXFILTRACIÓN")
+    print("=" * 60 + "\n")
 
-    if ip_usuario in IPS_AUTORIZADAS:
-        # Internal IP, but it still has a limit
+    if not validar_ip(ip_usuario):
+        print(f"⚠️ IP con formato raro: '{ip_usuario}' - analizando igual\n")
+
+    mb_totales = calcular_volumen_datos(ruta_target)
+    if mb_totales is None:
+        print("❌ No se pudo calcular el volumen. Escaneo cancelado.\n")
+        imprimir_separador()
+        return False
+
+    autorizada = ip_usuario in IPS_AUTORIZADAS
+    tipo_ip = "AUTORIZADA (interna)" if autorizada else "NO AUTORIZADA (externa)"
+    print(f"📍 IP: {ip_usuario} ({tipo_ip})")
+    print(f"📁 Ruta: {ruta_target}")
+    print(f"📦 Volumen: {mb_totales:.2f} MB\n")
+
+    if autorizada:
         if mb_totales > UMBRAL_AUTORIZADA:
-            print(f"⚠️ ALERTA AMARILLA: IP autorizada {ip_usuario} con volumen muy alto "
+            print(f"⚠️ ALERTA AMARILLA: IP autorizada con volumen muy alto "
                   f"({mb_totales:.2f} > {UMBRAL_AUTORIZADA} MB)")
             registrar_alerta(ip_usuario, mb_totales, "ALERTA AMARILLA", ruta_target)
+            imprimir_separador()
             return False
         print("✅ IP autorizada, volumen OK\n")
+        imprimir_separador()
         return True
 
-    # External IP, stricter limit
     if mb_totales > UMBRAL_NO_AUTORIZADA:
-        print(f"🚨 ALERTA ROJA: IP NO autorizada {ip_usuario} superó {UMBRAL_NO_AUTORIZADA} MB "
+        print(f"🚨 ALERTA ROJA: IP NO autorizada superó {UMBRAL_NO_AUTORIZADA} MB "
               f"({mb_totales:.2f} MB)")
         registrar_alerta(ip_usuario, mb_totales, "ALERTA ROJA", ruta_target)
+        imprimir_separador()
         return False
-    print("✅ IP no autorizada pero volumen pequeño, OK\n")
+
+    print(f"✅ IP no autorizada pero volumen pequeño (< {UMBRAL_NO_AUTORIZADA} MB), OK\n")
+    imprimir_separador()
     return True
 
 # ==========================================
