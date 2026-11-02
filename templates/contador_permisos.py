@@ -8,6 +8,10 @@ from datetime import datetime
 RUTA_LOGS = "logs/servidor_aws.log"
 CARPETA_REPORTES = "reportes"
 
+# Configuration
+USUARIOS_ADMIN = ["admin", "root"]
+UMBRAL_CAMBIOS = 3
+
 def crear_carpeta_reportes():
     os.makedirs(CARPETA_REPORTES, exist_ok=True)
 
@@ -24,11 +28,12 @@ def leer_cambios_permisos(ruta_logs):
     cambios = Counter()
     eventos = []
     patron_usuario = re.compile(r'(?:usuario|user)=([a-zA-Z0-9_.-]+)', re.I)
-    
+
     try:
         with open(ruta_logs, "r", errors="ignore") as f:
             for linea in f:
-                if "CHMOD" in linea.upper() or "PERMISSION" in linea.upper():
+                # Only CHMOD, to avoid false positives like "PERMISSION denied"
+                if "CHMOD" in linea.upper():
                     eventos.append(linea.strip())
                     m = patron_usuario.search(linea)
                     if m:
@@ -38,34 +43,41 @@ def leer_cambios_permisos(ruta_logs):
     except FileNotFoundError:
         print(f"❌ No se encontró '{ruta_logs}'")
         return None, None
+    except PermissionError:
+        print(f"❌ Sin permisos para leer '{ruta_logs}'")
+        return None, None
     return cambios, eventos
 
 def mostrar_dashboard(cambios, eventos):
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("📊 AUDITORÍA: CAMBIOS DE PERMISOS")
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
     total = sum(cambios.values())
     print(f"📈 Total de cambios: {total}\n")
     print("👥 Por usuario:")
     for user, cant in cambios.most_common():
-        pct = (cant/total*100) if total else 0
-        flag = " 🚨" if user != "admin" and user != "root" and cant > 3 else ""
+        pct = (cant / total * 100) if total else 0
+        flag = " 🚨" if user not in USUARIOS_ADMIN and cant > UMBRAL_CAMBIOS else ""
         print(f"   {user}: {cant} ({pct:.1f}%){flag}")
     print(f"\n📋 Eventos capturados: {len(eventos)}")
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
 def generar_reporte(cambios, eventos):
     crear_carpeta_reportes()
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ruta_out = f"{CARPETA_REPORTES}/auditoria_permisos.log"
-    with open(ruta_out, "a") as r:
-        r.write(f"\n[{ts}] AUDITORÍA PERMISOS - Total: {sum(cambios.values())}\n")
-        for u, c in cambios.most_common():
-            r.write(f"  {u}: {c}\n")
-        for ev in eventos:
-            r.write(f"  -> {ev}\n")
-    print(f"📝 Reporte guardado en: {ruta_out}\n")
-    return True
+    try:
+        with open(ruta_out, "a") as r:
+            r.write(f"\n[{ts}] AUDITORÍA PERMISOS - Total: {sum(cambios.values())}\n")
+            for u, c in cambios.most_common():
+                r.write(f"  {u}: {c}\n")
+            for ev in eventos:
+                r.write(f"  -> {ev}\n")
+        print(f"📝 Reporte guardado en: {ruta_out}\n")
+        return True
+    except (PermissionError, OSError) as e:
+        print(f"❌ Error al generar reporte: {e}")
+        return False
 
 def ejecutar_auditoria(ruta_logs):
     print("\n🔍 Iniciando auditoría de permisos...\n")
@@ -78,8 +90,7 @@ def ejecutar_auditoria(ruta_logs):
         print("✅ Sin cambios de permisos detectados.\n")
         return True
     mostrar_dashboard(cambios, eventos)
-    generar_reporte(cambios, eventos)
-    return True
+    return generar_reporte(cambios, eventos)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Auditoría de cambios de permisos")
