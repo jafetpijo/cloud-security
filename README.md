@@ -31,12 +31,12 @@ cloud-security/
 | # | Script | Detection | Key technique |
 |---|--------|-----------|---------------|
 | 1 | `detector_usuarios.py` | Brute-force logins | Counter + threshold per user |
-| 2 | `analizador.py` | Top IPs generating errors | Regex IP extraction + percentages |
+| 2 | `analizador.py` | Error spikes by IP | Regex IP extraction + sliding time window |
 | 3 | `detector_exfiltracion.py` | Data exfiltration (v1) | Flat 100 MB threshold |
 | 4 | `detector_empresa_completo.py` | Data exfiltration (v2) | Threshold by source type: external 20 MB, internal 100 MB |
 | 5 | `detector_acceso_ips_nuevas.py` | Logins from new IPs | Baseline of known IPs per user |
-| 6 | `clasificador.py` | Critical vs normal events | Log classification into two reports |
-| 7 | `contador_permisos.py` | Permission change auditing | CHMOD tracking, non-admin users above 3 changes flagged |
+| 6 | `clasificador.py` | Event classification | Rule table with severity levels |
+| 7 | `contador_permisos.py` | Permission change auditing | CHMOD tracking + sliding time window, risky modes flagged |
 | 8 | `resumen_diario.py` | Daily summary | Totals and percentages of errors, alerts and OK events |
 
 ## Quick Start
@@ -55,6 +55,7 @@ Reports are saved in `reportes/` with a timestamp, in append mode, so the histor
 ## Tech Highlights
 
 - Python 3, standard library only (`argparse`, `re`, `collections`, `datetime`, `os`)
+- Sliding time window detection (events within N minutes)
 - File validation and error handling (`FileNotFoundError`, `PermissionError`)
 - Timestamped reports in append mode
 - Modular functions, one responsibility each
@@ -69,10 +70,8 @@ Reports are saved in `reportes/` with a timestamp, in append mode, so the histor
 ## Roadmap
 
 - Read AWS CloudTrail logs with boto3
-- Time-window brute-force detection
 - JSON log support
 
 ## Author
 
 **Jafet García** | Aspiring Cloud Security Engineer | Python, Linux, Networking | Costa Rica
-
