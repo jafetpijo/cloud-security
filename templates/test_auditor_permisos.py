@@ -12,12 +12,15 @@ class TestRiskyMode(unittest.TestCase):
         for mode, reason in [("777", "world-writable"), ("666", "world-writable"),
                              ("4755", "setuid/setgid bit"), ("2755", "setuid/setgid bit"),
                              ("o+w", "world-writable"), ("a+rwx", "world-writable"),
-                             ("+s", "setuid/setgid bit"), ("u+s", "setuid/setgid bit")]:
+                             ("+s", "setuid/setgid bit"), ("u+s", "setuid/setgid bit"),
+                             # short numeric modes are padded with zeros: 2 = 0002
+                             ("2", "world-writable"), ("77", "world-writable")]:
             with self.subTest(mode=mode):
                 self.assertEqual(a.is_risky_mode(mode), reason)
 
     def test_safe(self):
-        for mode in ["644", "0644", "750", "g-w", "u=rwx,go=rx", "+t"]:
+        # "+w" with no u/g/o/a follows the umask (usually 022): owner only
+        for mode in ["644", "0644", "750", "g-w", "u=rwx,go=rx", "+t", "+w", "5", "70"]:
             with self.subTest(mode=mode):
                 self.assertIsNone(a.is_risky_mode(mode))
 
@@ -33,6 +36,13 @@ class TestParseLine(unittest.TestCase):
         ev = a.parse_line("user=x action=PutBucketPublicAccessBlock")
         self.assertEqual(ev["kind"], "cloud_permission")
         self.assertIsNone(ev["risk"])
+
+    def test_chmod_options_before_mode(self):
+        # Old bug: long options like --recursive were read as the mode
+        for options in ["-R", "--recursive", "-R --verbose", "-v -R"]:
+            with self.subTest(options=options):
+                ev = a.parse_line(f"2026-06-01 10:00:00 user=x action=chmod {options} 777 /var/www")
+                self.assertEqual((ev["detail"], ev["risk"]), ("777", "world-writable"))
 
     def test_deleting_public_access_block_is_risky(self):
         self.assertTrue(a.parse_line("user=x action=DeleteBucketPublicAccessBlock")["risk"])

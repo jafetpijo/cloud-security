@@ -37,8 +37,8 @@ APP_SUCCESS_REGEX = re.compile(r"LOGIN OK|LOGIN SUCCESS|SUCCESSFUL LOGIN", re.IG
 # Two separate patterns, so the order of user/ip in the line does not matter
 APP_USER_REGEX = re.compile(r"\b(?:usuario|user)=([\w.@-]+)", re.IGNORECASE)
 APP_IP_REGEX = re.compile(r"\bip=([0-9.]+)", re.IGNORECASE)
-SSHD_REGEX = re.compile(r"Accepted (?:password|publickey) for ([\w.@-]+) from ([0-9.]+)",
-                        re.IGNORECASE)
+# Any sshd method: password, publickey, keyboard-interactive/pam (2FA), gssapi...
+SSHD_REGEX = re.compile(r"Accepted [\w/-]+ for ([\w.@-]+) from ([0-9.]+)", re.IGNORECASE)
 ISO_TS_REGEX = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})")
 SYSLOG_TS_REGEX = re.compile(r"^([A-Z][a-z]{2})\s+(\d{1,2}) (\d{2}:\d{2}:\d{2})")
 

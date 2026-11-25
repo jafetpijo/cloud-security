@@ -117,7 +117,7 @@ cloud-security/
 
 ## Tests
 
-Every tool has unit tests (59 in total). Run them from the `templates` folder:
+Every tool has unit tests (66 in total). Run them from the `templates` folder:
 
 ```bash
 cd templates

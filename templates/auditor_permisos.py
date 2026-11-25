@@ -30,7 +30,8 @@ SEVERITY_ORDER = {"CRITICAL": 3, "HIGH": 2, "MEDIUM": 1, "OK": 0}
 
 USER_REGEX = re.compile(r"\b(?:usuario|user)=([\w.@-]+)", re.IGNORECASE)
 TS_REGEX = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})")
-CHMOD_REGEX = re.compile(r"\bchmod\s+(?:-\w+\s+)*(\S+)", re.IGNORECASE)
+# Skips options before the mode: short (-R, -v) and long (--recursive, --verbose)
+CHMOD_REGEX = re.compile(r"\bchmod\s+(?:--?[\w-]+\s+)*(\S+)", re.IGNORECASE)
 CHOWN_REGEX = re.compile(r"\b(?:chown|chgrp|setfacl)\b", re.IGNORECASE)
 SYMBOLIC_PART = re.compile(r"^([ugoa]*)([+=-])([rwxXst]*)$")
 
@@ -57,12 +58,12 @@ DEMO_LOG = """2026-06-01 10:15:22 user=admin action=chmod 777 /var/www/html
 # --- Parsing -----------------------------------------------------------------
 def is_risky_mode(mode):
     """Return a reason string if a chmod mode is dangerous, otherwise None."""
-    if re.fullmatch(r"[0-7]{3,4}", mode):
-        special = int(mode[0]) if len(mode) == 4 else 0
-        other = int(mode[-1])
-        if special & 0b110:
+    if re.fullmatch(r"[0-7]{1,4}", mode):
+        # chmod pads short modes with leading zeros: "2" means 0002 (world-writable)
+        bits = int(mode, 8)
+        if bits & 0o6000:
             return "setuid/setgid bit"
-        if other & 0b010:
+        if bits & 0o002:
             return "world-writable"
         return None
     for part in mode.split(","):
@@ -70,8 +71,10 @@ def is_risky_mode(mode):
         if not m or m.group(2) == "-":
             continue
         who, _, perms = m.groups()
-        who = who or "a"
-        if "s" in perms and ("u" in who or "g" in who or "a" in who):
+        # With no u/g/o/a, chmod acts like "a" but skips bits set in the umask.
+        # The usual umask (022) blocks group/other write, so "+w" only affects the
+        # owner; setuid/setgid are never in the umask, so "+s" still sets them.
+        if "s" in perms and (not who or "u" in who or "g" in who or "a" in who):
             return "setuid/setgid bit"
         if "w" in perms and ("o" in who or "a" in who):
             return "world-writable"

@@ -36,6 +36,53 @@ class TestParsing(unittest.TestCase):
         ev = b.parse_line("Accepted password for ana from 192.168.1.20", True, 2026)
         self.assertEqual((ev["kind"], ev["user"]), ("ok", "ana"))
 
+    def test_keyboard_interactive_success_and_failure(self):
+        # Old bug: logins through PAM/2FA were ignored, so a successful attack stayed HIGH
+        ok = b.parse_line("Nov 17 10:00:30 h sshd[9]: Accepted keyboard-interactive/pam "
+                          "for admin from 198.51.100.9 port 22", True, 2026)
+        self.assertEqual((ok["kind"], ok["user"]), ("ok", "admin"))
+        fail = b.parse_line("Nov 17 10:00:20 h sshd[9]: Failed keyboard-interactive/pam "
+                            "for admin from 198.51.100.9 port 22", True, 2026)
+        self.assertEqual((fail["kind"], fail["user"]), ("fail", "admin"))
+
+    def test_pam_copies_of_sshd_failures_are_skipped(self):
+        # Old bug: each failed SSH password was counted twice (PAM + sshd)
+        for line in [
+            "Nov 17 10:00:01 h sshd[9]: pam_unix(sshd:auth): authentication failure; logname= "
+            "uid=0 euid=0 tty=ssh ruser= rhost=203.0.113.7  user=root",
+            "Nov 17 10:00:09 h sshd[9]: PAM 5 more authentication failures; logname= uid=0 "
+            "euid=0 tty=ssh ruser= rhost=203.0.113.7  user=root",
+        ]:
+            with self.subTest(line=line):
+                self.assertIsNone(b.parse_line(line, True, 2026))
+
+    def test_pam_failures_from_other_services_still_count(self):
+        ev = b.parse_line("Nov 17 10:00:01 h su[9]: pam_unix(su:auth): authentication failure; "
+                          "logname=ana uid=1000 euid=0 tty=pts/0 ruser=ana rhost=  user=root",
+                          True, 2026)
+        self.assertEqual(ev["kind"], "fail")
+
+    def test_real_auth_log_counts_each_attempt_once(self):
+        lines = []
+        for i in range(6):
+            lines += [
+                f"Nov 17 10:00:{i:02d} h sshd[9]: pam_unix(sshd:auth): authentication failure; "
+                f"logname= uid=0 euid=0 tty=ssh ruser= rhost=203.0.113.7  user=root",
+                f"Nov 17 10:00:{i:02d} h sshd[9]: Failed password for root from 203.0.113.7 port 22",
+            ]
+        result = b.analyze_by(b.read_events(lines, True, 2026), "ip", 10, 5)[0]
+        self.assertEqual(result["total_failures"], 6)
+        self.assertEqual(result["severity"], "OK")    # 6 attempts, not 12
+
+    def test_non_auth_denials_are_not_failures(self):
+        # Old bug: any "denied" or "forbidden" counted as a failed login
+        for line in [
+            "2026-11-17 10:00:00 nginx: access forbidden by rule, client: 10.0.0.5",
+            'Nov 17 10:00:00 h kernel: audit: apparmor="DENIED" operation="open" profile="x"',
+        ]:
+            with self.subTest(line=line):
+                self.assertIsNone(b.parse_line(line, True, 2026))
+
 
 class TestAnalyze(unittest.TestCase):
     def setUp(self):

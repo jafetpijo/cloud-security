@@ -45,12 +45,25 @@ SYSLOG_TS_REGEX = re.compile(r"^([A-Z][a-z]{2})\s+(\d{1,2}) (\d{2}:\d{2}:\d{2})"
 
 # Failed access attempts (not application failures). Includes the Spanish
 # "contraseña incorrecta" style used by the app logs.
+# Only authentication wording: a bare "denied" or "forbidden" also matches
+# AppArmor, firewall or web server rules that have nothing to do with logins.
 AUTH_FAIL_REGEX = re.compile(
-    r"failed password|invalid user|authentication failure|access\s?denied|denied|"
-    r"\bincorrect[ao]?\b|unauthorized|forbidden|\"\s+(?:401|403)\b|status=(?:401|403)\b",
+    r"failed (?:password|keyboard-interactive/pam) for|invalid user|authentication failure|"
+    r"access\s?denied|\bincorrect[ao]?\b|\bunauthorized\b|"
+    r"\"\s+(?:401|403)\b|status=(?:401|403)\b",
     re.IGNORECASE,
 )
-AUTH_OK_REGEX = re.compile(r"accepted (?:password|publickey)|login (?:ok|success)", re.IGNORECASE)
+# sshd logs every failed password twice in auth.log: once from PAM
+# ("pam_unix(sshd:auth): authentication failure") and once from sshd itself
+# ("Failed password for ..."), plus a "PAM N more authentication failures"
+# summary when the connection closes. Counting all of them would inflate the
+# number of attempts, so these PAM copies are skipped.
+SSHD_PAM_DUPLICATE_REGEX = re.compile(
+    r"pam_unix\(sshd:auth\): authentication failure|\bPAM \d+ more authentication failures?",
+    re.IGNORECASE,
+)
+# Any sshd method: password, publickey, keyboard-interactive/pam (2FA), gssapi...
+AUTH_OK_REGEX = re.compile(r"accepted [\w/-]+ for|login (?:ok|success)", re.IGNORECASE)
 ERROR_REGEX = re.compile(r"\bERROR\b", re.IGNORECASE)
 
 DEMO_LOG = "\n".join(
@@ -104,6 +117,8 @@ def parse_timestamp(line, year):
 
 def parse_line(line, auth_only, year):
     """Return {'kind': 'fail'|'ok', 'ip', 'user', 'time'} if relevant, otherwise None."""
+    if SSHD_PAM_DUPLICATE_REGEX.search(line):
+        return None
     if AUTH_OK_REGEX.search(line):
         kind = "ok"
     elif (AUTH_FAIL_REGEX if auth_only else ERROR_REGEX).search(line):

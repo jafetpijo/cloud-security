@@ -16,6 +16,13 @@ class TestParseLogin(unittest.TestCase):
         line = "Nov 17 10:00:30 web01 sshd[99]: Accepted password for admin from 198.51.100.9 port 22"
         self.assertEqual(d.parse_login(line, 2026), ("admin", "198.51.100.9", "2026-11-17 10:00:30"))
 
+    def test_sshd_other_auth_methods(self):
+        # Old bug: logins through PAM/2FA or publickey with other methods were ignored
+        for method in ["publickey", "keyboard-interactive/pam", "gssapi-with-mic"]:
+            with self.subTest(method=method):
+                line = f"Nov 17 10:00:30 h sshd[9]: Accepted {method} for admin from 198.51.100.9 port 22"
+                self.assertEqual(d.parse_login(line, 2026)[:2], ("admin", "198.51.100.9"))
+
     def test_failed_and_unrelated_lines(self):
         self.assertIsNone(d.parse_login("Failed password for admin from 1.2.3.4", 2026))
         self.assertIsNone(d.parse_login("TOKEN refreshed user=ana ip=1.2.3.4", 2026))
