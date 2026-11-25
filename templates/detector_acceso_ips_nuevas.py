@@ -20,27 +20,25 @@ Workflow:
 Exit codes: 0 = no alerts, 1 = alerts found, 2 = error.
 """
 import argparse
-import ipaddress
-import json
 import logging
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
 
-log = logging.getLogger("new_ips")
+from common import (EXIT_ALERTS, EXIT_ERROR, EXIT_OK, KV_USER_REGEX, SSHD_ACCEPTED,
+                    add_year_argument, parse_privileged, parse_timestamp, read_log_lines,
+                    setup_logging, valid_ip, write_json)
 
-EXIT_OK, EXIT_ALERTS, EXIT_ERROR = 0, 1, 2
+log = logging.getLogger("new_ips")
 
 # Match "LOGIN OK" / "SUCCESS", not just "OK" (avoids TOKEN, BROKEN)
 APP_SUCCESS_REGEX = re.compile(r"LOGIN OK|LOGIN SUCCESS|SUCCESSFUL LOGIN", re.IGNORECASE)
 # Two separate patterns, so the order of user/ip in the line does not matter
-APP_USER_REGEX = re.compile(r"\b(?:usuario|user)=([\w.@-]+)", re.IGNORECASE)
+APP_USER_REGEX = KV_USER_REGEX
 APP_IP_REGEX = re.compile(r"\bip=([0-9.]+)", re.IGNORECASE)
 # Any sshd method: password, publickey, keyboard-interactive/pam (2FA), gssapi...
-SSHD_REGEX = re.compile(r"Accepted [\w/-]+ for ([\w.@-]+) from ([0-9.]+)", re.IGNORECASE)
-ISO_TS_REGEX = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})")
-SYSLOG_TS_REGEX = re.compile(r"^([A-Z][a-z]{2})\s+(\d{1,2}) (\d{2}:\d{2}:\d{2})")
+SSHD_REGEX = re.compile(rf"{SSHD_ACCEPTED} ([\w.@-]+) from ([0-9.]+)", re.IGNORECASE)
 
 DEMO_BASELINE = {"ana,192.168.1.20", "admin,10.0.0.4"}
 DEMO_LOG = """2026-11-17 08:00:00 LOGIN OK user=ana ip=192.168.1.20
@@ -70,16 +68,12 @@ def save_baseline(path, pairs):
 
 
 # --- Parsing -----------------------------------------------------------------
-def parse_timestamp(line, year):
-    if m := ISO_TS_REGEX.search(line):
-        return f"{m.group(1)} {m.group(2)}"
-    if m := SYSLOG_TS_REGEX.search(line):
-        ts = datetime.strptime(f"{year} {m.group(1)} {m.group(2)} {m.group(3)}", "%Y %b %d %H:%M:%S")
-        return ts.strftime("%Y-%m-%d %H:%M:%S")
-    return None
+def timestamp_text(line, year=None):
+    ts = parse_timestamp(line, year)
+    return ts.strftime("%Y-%m-%d %H:%M:%S") if ts else None
 
 
-def parse_login(line, year):
+def parse_login(line, year=None):
     """Return (user, ip, timestamp) for a successful login line, otherwise None."""
     if m := SSHD_REGEX.search(line):
         user, ip = m.group(1), m.group(2)
@@ -90,15 +84,13 @@ def parse_login(line, year):
         user, ip = m_user.group(1), m_ip.group(1)
     else:
         return None
-    try:
-        ip = str(ipaddress.ip_address(ip))     # rejects values like 999.1.1.1
-    except ValueError:
+    if (ip := valid_ip(ip)) is None:          # rejects values like 999.1.1.1
         return None
-    return user.lower(), ip, parse_timestamp(line, year)
+    return user.lower(), str(ip), timestamp_text(line, year)
 
 
 # --- Analysis ----------------------------------------------------------------
-def find_new_logins(lines, baseline, privileged, year):
+def find_new_logins(lines, baseline, privileged, year=None):
     """Return the first login of each user/IP pair not in the baseline."""
     seen = set(baseline)
     alerts = []
@@ -153,8 +145,7 @@ def build_parser():
                    help="Add the new pairs to the baseline after reporting them")
     p.add_argument("--privileged-users", default="root,admin",
                    help="Comma-separated privileged accounts (default: root,admin)")
-    p.add_argument("--year", type=int, default=datetime.now().year,
-                   help="Year for syslog timestamps, which don't include one (default: current)")
+    add_year_argument(p)
     p.add_argument("--output-dir", default="reportes", help="Directory for the report (default: reportes)")
     p.add_argument("--json-output", help="Write results to a JSON file (SIEM-friendly)")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -163,28 +154,24 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging(args.verbose)
 
     if args.demo:
         log.info("Demo mode: using built-in sample log and baseline")
         lines, baseline = DEMO_LOG.splitlines(), set(DEMO_BASELINE)
     else:
-        src = Path(args.log)
-        if not src.is_file():
-            log.error("Log file not found: %s", src)   # never invent data
+        if (lines := read_log_lines(args.log, log)) is None:
             return EXIT_ERROR
         try:
-            lines = src.read_text(encoding="utf-8", errors="ignore").splitlines()
             baseline = load_baseline(args.baseline)
         except OSError as e:
-            log.error("Could not read input: %s", e)
+            log.error("Could not read the baseline: %s", e)
             return EXIT_ERROR
         if not baseline:
             log.warning("Baseline is empty: every login will look new. "
                         "Run once on a normal log with --learn to build it.")
 
-    privileged = {u.strip().lower() for u in args.privileged_users.split(",") if u.strip()}
+    privileged = parse_privileged(args.privileged_users)
     alerts = find_new_logins(lines, baseline, privileged, args.year)
 
     if not alerts:
@@ -195,8 +182,7 @@ def main(argv=None):
     try:
         write_report(args.output_dir, alerts)
         if args.json_output:
-            Path(args.json_output).write_text(json.dumps({"alerts": alerts}, indent=2),
-                                              encoding="utf-8")
+            write_json(args.json_output, {"alerts": alerts})
             log.info("Results saved to %s", args.json_output)
         if args.learn and not args.demo:
             save_baseline(args.baseline, {a["pair"] for a in alerts})

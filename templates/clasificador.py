@@ -8,16 +8,15 @@ ATT&CK technique) and writes the relevant ones to an alerts file.
 Exit codes: 0 = nothing at or above --fail-on, 1 = alerts found, 2 = error.
 """
 import argparse
-import json
 import logging
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 
-log = logging.getLogger("classifier")
+from common import EXIT_ALERTS, EXIT_ERROR, EXIT_OK, read_log_lines, setup_logging, write_json
 
-EXIT_OK, EXIT_ALERTS, EXIT_ERROR = 0, 1, 2
+log = logging.getLogger("classifier")
 SEVERITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]  # ascending order
 
 # (category, regex, severity, MITRE technique). First match wins, so keep the
@@ -120,22 +119,13 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging(args.verbose)
 
     if args.demo:
         log.info("Demo mode: using built-in sample log")
         lines = DEMO_LOG.splitlines()
-    else:
-        src = Path(args.log)
-        if not src.is_file():
-            log.error("Log file not found: %s", src)   # never invent data
-            return EXIT_ERROR
-        try:
-            lines = src.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except OSError as e:
-            log.error("Could not read %s: %s", src, e)
-            return EXIT_ERROR
+    elif (lines := read_log_lines(args.log, log)) is None:
+        return EXIT_ERROR
 
     out_dir = Path(args.output_dir)
     alerts_path = out_dir / "alerts.log"
@@ -161,10 +151,10 @@ def main(argv=None):
         log.info("Alerts written to %s", alerts_path)
 
         if args.json_output:
-            Path(args.json_output).write_text(json.dumps({
+            write_json(args.json_output, {
                 "total": total, "unclassified": normal_count,
                 "by_severity": dict(by_severity), "by_category": dict(by_category),
-            }, indent=2), encoding="utf-8")
+            })
             log.info("Summary saved to %s", args.json_output)
     except OSError as e:
         log.error("Could not write output: %s", e)

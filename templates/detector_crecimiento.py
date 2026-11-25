@@ -23,19 +23,26 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-log = logging.getLogger("growth")
+from common import EXIT_ALERTS, EXIT_ERROR, EXIT_OK, setup_logging, write_json
 
-EXIT_OK, EXIT_ALERTS, EXIT_ERROR = 0, 1, 2
+log = logging.getLogger("growth")
 MB = 1024 * 1024
 
 
 # --- Measuring ---------------------------------------------------------------
 def scan_folder(path, since=None, top=5):
     """Return (total_bytes, biggest files changed after `since`).
-    Symlinks are skipped to avoid loops and double counting."""
+    Symlinks are skipped to avoid loops and double counting. Folders that can't
+    be read are reported: their size is missing from the total, so a permission
+    change would otherwise look like a mass deletion."""
     total = 0
     changed = []
-    for root, _, files in os.walk(path, followlinks=False):
+
+    def unreadable(err):
+        log.warning("Could not read %s (%s): size may look smaller than it is",
+                    err.filename, err.strerror)
+
+    for root, _, files in os.walk(path, followlinks=False, onerror=unreadable):
         for name in files:
             full = os.path.join(root, name)
             try:
@@ -108,19 +115,26 @@ def print_summary(results, threshold_mb):
 
 
 # --- Demo --------------------------------------------------------------------
+def make_file(path, size):
+    """Create a sparse file: it reports `size` bytes but uses almost no disk or
+    memory, so the demo works with any --threshold."""
+    with open(path, "wb") as f:
+        f.truncate(size)
+
+
 def run_demo(threshold_mb):
     """Simulate two checks in a temporary folder; never touches real files."""
     with tempfile.TemporaryDirectory() as tmp:
         folder = Path(tmp) / "carpetas_empresa"
         folder.mkdir()
-        (folder / "report.pdf").write_bytes(b"x" * 2 * MB)
+        make_file(folder / "report.pdf", 2 * MB)
         log.info("Demo, check 1: normal folder")
         results, state = check_folders([str(folder)], {}, threshold_mb, datetime.now().timestamp())
         print_summary(results, threshold_mb)
 
         log.info("Demo, check 2: someone copied a big archive into it")
         (folder / "tmp").mkdir()
-        (folder / "tmp" / "all_clients.zip").write_bytes(b"x" * (int(threshold_mb) + 5) * MB)
+        make_file(folder / "tmp" / "all_clients.zip", int((threshold_mb + 5) * MB))
         results, _ = check_folders([str(folder)], state, threshold_mb, datetime.now().timestamp())
         print_summary(results, threshold_mb)
         return results
@@ -144,8 +158,7 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging(args.verbose)
 
     if args.demo:
         results = run_demo(args.threshold)
@@ -166,8 +179,7 @@ def main(argv=None):
 
     if args.json_output:
         try:
-            Path(args.json_output).write_text(json.dumps({"results": results}, indent=2),
-                                              encoding="utf-8")
+            write_json(args.json_output, {"results": results})
             log.info("Results saved to %s", args.json_output)
         except OSError as e:
             log.error("Could not write output: %s", e)

@@ -14,8 +14,6 @@ Understands the same formats as the rest of the kit:
 Exit codes: 0 = summary written, 2 = error.
 """
 import argparse
-import ipaddress
-import json
 import logging
 import re
 import sys
@@ -23,9 +21,11 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-log = logging.getLogger("summary")
+from common import (EXIT_ERROR, EXIT_OK, IPV4, SSHD_ACCEPTED, SSHD_PAM_DUPLICATE_REGEX,
+                    add_year_argument, parse_timestamp, read_log_lines, setup_logging,
+                    valid_ip, write_json)
 
-EXIT_OK, EXIT_ERROR = 0, 2
+log = logging.getLogger("summary")
 
 # Event types, checked in order (first match wins). Whole words only, so
 # "TOKEN" or "BROKEN" are not counted as "OK", and "ERRORS" is not "ERROR".
@@ -34,18 +34,15 @@ EVENT_TYPES = [
         r"failed password|invalid user|authentication failure|\bincorrect[ao]?\b|access\s?denied",
         re.IGNORECASE)),
     ("successful_login", re.compile(
-        r"accepted (?:password|publickey)|login (?:ok|success)|successful login", re.IGNORECASE)),
+        rf"{SSHD_ACCEPTED}|login (?:ok|success)|successful login", re.IGNORECASE)),
     ("alert", re.compile(r"\bALERT\b|\bCRITICAL\b", re.IGNORECASE)),
     ("download", re.compile(r"\bDOWNLOAD\b|\bGetObject\b", re.IGNORECASE)),
     ("error", re.compile(r"\bERROR\b", re.IGNORECASE)),
 ]
 
-IPV4 = r"(?:\d{1,3}\.){3}\d{1,3}"
 IP_REGEX = re.compile(rf"\b(?:from|ip[=:]|rhost=|src=)\s*({IPV4})\b", re.IGNORECASE)
 USER_REGEX = re.compile(
     r"\bfor (?:invalid user )?([\w.@-]+) from\b|\b(?:usuario|user)[=:]\s*([\w.@-]+)", re.IGNORECASE)
-ISO_TS_REGEX = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})")
-SYSLOG_TS_REGEX = re.compile(r"^([A-Z][a-z]{2})\s+(\d{1,2}) (\d{2}:\d{2}:\d{2})")
 
 DEMO_LOG = """2026-11-17 08:00:00 LOGIN OK user=ana ip=192.168.1.20
 2026-11-17 08:01:00 TOKEN refreshed user=ana ip=192.168.1.20
@@ -61,27 +58,17 @@ Nov 17 09:00:03 web01 sshd[99]: Failed password for invalid user test from 203.0
 
 # --- Parsing -----------------------------------------------------------------
 def event_type(line):
+    if SSHD_PAM_DUPLICATE_REGEX.search(line):
+        return "other"      # PAM copy of an sshd failure: the sshd line is the one counted
     for name, regex in EVENT_TYPES:
         if regex.search(line):
             return name
     return "other"
 
 
-def parse_timestamp(line, year):
-    if m := ISO_TS_REGEX.search(line):
-        return datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S")
-    if m := SYSLOG_TS_REGEX.search(line):
-        return datetime.strptime(f"{year} {m.group(1)} {m.group(2)} {m.group(3)}",
-                                 "%Y %b %d %H:%M:%S")
-    return None
-
-
 def find_ip(line):
-    if m := IP_REGEX.search(line):
-        try:
-            return str(ipaddress.ip_address(m.group(1)))
-        except ValueError:
-            return None
+    if (m := IP_REGEX.search(line)) and (ip := valid_ip(m.group(1))):
+        return str(ip)
     return None
 
 
@@ -92,7 +79,7 @@ def find_user(line):
 
 
 # --- Summary -----------------------------------------------------------------
-def summarize(lines, year, top=5):
+def summarize(lines, year=None, top=5):
     by_type, ips, users = Counter(), Counter(), Counter()
     failed_by_ip = Counter()
     first = last = None
@@ -161,8 +148,7 @@ def build_parser():
     p.add_argument("--log", default="logs/servidor_aws.log", help="Path to the log file to analyze")
     p.add_argument("--demo", action="store_true", help="Run on a built-in sample log (ignores --log)")
     p.add_argument("--top", type=int, default=5, help="How many IPs/users to list (default 5)")
-    p.add_argument("--year", type=int, default=datetime.now().year,
-                   help="Year for syslog timestamps, which don't include one (default: current)")
+    add_year_argument(p)
     p.add_argument("--output-dir", default="reportes", help="Directory for the report (default: reportes)")
     p.add_argument("--json-output", help="Write the summary to a JSON file (SIEM-friendly)")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -171,22 +157,13 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging(args.verbose)
 
     if args.demo:
         log.info("Demo mode: using built-in sample log")
         lines = DEMO_LOG.splitlines()
-    else:
-        src = Path(args.log)
-        if not src.is_file():
-            log.error("Log file not found: %s", src)   # never invent data
-            return EXIT_ERROR
-        try:
-            lines = src.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except OSError as e:
-            log.error("Could not read %s: %s", src, e)
-            return EXIT_ERROR
+    elif (lines := read_log_lines(args.log, log)) is None:
+        return EXIT_ERROR
 
     summary = summarize(lines, args.year, args.top)
     if summary["total_events"] == 0:
@@ -204,7 +181,7 @@ def main(argv=None):
             f.write(report + "\n\n")
         log.info("Summary appended to %s", out_dir / "daily_summary.log")
         if args.json_output:
-            Path(args.json_output).write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            write_json(args.json_output, summary)
             log.info("Summary saved to %s", args.json_output)
     except OSError as e:
         log.error("Could not write output: %s", e)

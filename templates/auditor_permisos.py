@@ -10,26 +10,29 @@ MITRE ATT&CK: T1222 / T1222.002 (File and Directory Permissions Modification),
               T1548.001 (Setuid and Setgid), T1098 (Account Manipulation),
               T1098.001 (Additional Cloud Credentials)
 
-            
+Understands key=value app logs ("user=ana action=chmod 777 /srv") and sudo
+lines from auth.log ("sudo: ana : TTY=pts/0 ; ... COMMAND=/bin/chmod 777 /srv").
 
 Exit codes: 0 = no alerts, 1 = alerts found, 2 = error.
 """
 import argparse
-import json
 import logging
 import re
 import sys
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
+
+from common import (EXIT_ALERTS, EXIT_ERROR, EXIT_OK, KV_USER_REGEX, add_year_argument,
+                    max_in_window, parse_privileged, parse_timestamp, setup_logging, write_json)
 
 log = logging.getLogger("permissions")
 
-EXIT_OK, EXIT_ALERTS, EXIT_ERROR = 0, 1, 2
 SEVERITY_ORDER = {"CRITICAL": 3, "HIGH": 2, "MEDIUM": 1, "OK": 0}
 
-USER_REGEX = re.compile(r"\b(?:usuario|user)=([\w.@-]+)", re.IGNORECASE)
-TS_REGEX = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})")
+# sudo names the account that ran the command right after "sudo:". The same line
+# has "USER=root" (the target account), which must not be read as the actor.
+SUDO_USER_REGEX = re.compile(r"\bsudo(?:\[\d+\])?:\s+([\w.@-]+)\s+:")
 # Skips options before the mode: short (-R, -v) and long (--recursive, --verbose)
 CHMOD_REGEX = re.compile(r"\bchmod\s+(?:--?[\w-]+\s+)*(\S+)", re.IGNORECASE)
 CHOWN_REGEX = re.compile(r"\b(?:chown|chgrp|setfacl)\b", re.IGNORECASE)
@@ -52,6 +55,7 @@ DEMO_LOG = """2026-06-01 10:15:22 user=admin action=chmod 777 /var/www/html
 2026-06-01 10:23:00 user=ana action=chmod 644 /srv/b.txt
 2026-06-01 10:24:00 user=ana action=chmod 640 /srv/c.txt
 2026-06-01 10:25:00 user=ana action=chown ana /srv/d.txt
+Jun  1 10:26:00 web01 sudo:    carlos : TTY=pts/0 ; PWD=/home/carlos ; USER=root ; COMMAND=/usr/bin/chmod 4755 /tmp/sh
 """
 
 
@@ -81,7 +85,13 @@ def is_risky_mode(mode):
     return None
 
 
-def parse_line(line):
+def actor(line):
+    """Account that made the change, or 'unknown'."""
+    m = SUDO_USER_REGEX.search(line) or KV_USER_REGEX.search(line)
+    return m.group(1).lower() if m else "unknown"
+
+
+def parse_line(line, year=None):
     """Return an event dict if the line is a permission change, otherwise None."""
     kind = risk = detail = None
     if m := CLOUD_RISKY_REGEX.search(line):
@@ -94,38 +104,23 @@ def parse_line(line):
         kind = "ownership_acl"
     if kind is None:
         return None
-    u = USER_REGEX.search(line)
-    t = TS_REGEX.search(line)
     return {
-        "user": u.group(1).lower() if u else "unknown",
-        "time": datetime.strptime(f"{t.group(1)} {t.group(2)}", "%Y-%m-%d %H:%M:%S") if t else None,
+        "user": actor(line),
+        "time": parse_timestamp(line, year),
         "kind": kind, "detail": detail, "risk": risk, "line": line.strip(),
     }
 
 
-def read_events(path):
+def read_events(path, year=None):
     events = []
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
-            if ev := parse_line(line):
+            if ev := parse_line(line, year):
                 events.append(ev)
     return events
 
 
 # --- Analysis ----------------------------------------------------------------
-def max_in_window(times, window):
-    """Maximum number of events in any interval of length `window` (sliding window)."""
-    times = sorted(t for t in times if t is not None)
-    best, left = (0, None, None), 0
-    for right, t in enumerate(times):
-        while t - times[left] > window:
-            left += 1
-        n = right - left + 1
-        if n > best[0]:
-            best = (n, times[left], t)
-    return best
-
-
 def analyze(events, threshold, window_min, privileged):
     window = timedelta(minutes=window_min)
     by_user = defaultdict(list)
@@ -191,6 +186,7 @@ def build_parser():
     p.add_argument("--window", type=int, default=10, help="Window size in minutes (default 10)")
     p.add_argument("--privileged-users", default="root,admin",
                    help="Comma-separated privileged accounts (default: root,admin)")
+    add_year_argument(p)
     p.add_argument("--output-dir", default="reportes",
                    help="Directory for the report (default: reportes)")
     p.add_argument("--json-output", help="Write results to a JSON file (SIEM-friendly)")
@@ -200,8 +196,7 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging(args.verbose)
 
     if args.demo:
         log.info("Demo mode: using built-in sample log")
@@ -215,7 +210,7 @@ def main(argv=None):
             log.warning("Empty file: %s", src)
             return EXIT_OK
         try:
-            events = read_events(src)
+            events = read_events(src, args.year)
         except OSError as e:
             log.error("Could not read %s: %s", src, e)
             return EXIT_ERROR
@@ -224,7 +219,7 @@ def main(argv=None):
         log.info("No permission changes detected.")
         return EXIT_OK
 
-    privileged = {u.strip().lower() for u in args.privileged_users.split(",") if u.strip()}
+    privileged = parse_privileged(args.privileged_users)
     results = analyze(events, args.threshold, args.window, privileged)
     log.info("Permission changes: %d | users: %d", len(events), len(results))
     print_summary(results, args.window)
@@ -232,9 +227,8 @@ def main(argv=None):
     try:
         write_report(args.output_dir, events)
         if args.json_output:
-            Path(args.json_output).write_text(json.dumps({
-                "threshold": args.threshold, "window_min": args.window,
-                "results": results}, indent=2), encoding="utf-8")
+            write_json(args.json_output, {"threshold": args.threshold,
+                                          "window_min": args.window, "results": results})
             log.info("Results saved to %s", args.json_output)
     except OSError as e:
         log.error("Could not write output: %s", e)

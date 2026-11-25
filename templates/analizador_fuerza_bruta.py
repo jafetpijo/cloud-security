@@ -21,27 +21,21 @@ Exit codes: 0 = no alerts, 1 = alerts found, 2 = error.
 """
 import argparse
 import ipaddress
-import json
 import logging
 import re
 import sys
 from collections import defaultdict
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import timedelta
+
+from common import (EXIT_ALERTS, EXIT_ERROR, EXIT_OK, IPV4, SSHD_ACCEPTED,
+                    SSHD_PAM_DUPLICATE_REGEX, add_year_argument, find_user, max_in_window,
+                    parse_timestamp, read_log_lines, setup_logging, valid_ip, write_json)
 
 log = logging.getLogger("bruteforce")
 
-EXIT_OK, EXIT_ALERTS, EXIT_ERROR = 0, 1, 2
-
-IPV4 = r"(?:\d{1,3}\.){3}\d{1,3}"
 IP_REGEX = re.compile(rf"\b{IPV4}\b")
 # Where the attacker's IP usually is: "from 1.2.3.4", "rhost=1.2.3.4", "src=1.2.3.4", "ip=1.2.3.4"
 SOURCE_IP_REGEX = re.compile(rf"\b(?:from|rhost=|src=|ip=|client=?)\s*({IPV4})\b", re.IGNORECASE)
-# Target account: sshd style first, then key=value style (usuario= or user=)
-SSHD_USER_REGEX = re.compile(r"\bfor (?:invalid user )?([\w.@-]+) from\b", re.IGNORECASE)
-KV_USER_REGEX = re.compile(r"\b(?:usuario|user)=([\w.@-]+)", re.IGNORECASE)
-ISO_TS_REGEX = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})")
-SYSLOG_TS_REGEX = re.compile(r"^([A-Z][a-z]{2})\s+(\d{1,2}) (\d{2}:\d{2}:\d{2})")
 
 # Failed access attempts (not application failures). Includes the Spanish
 # "contraseña incorrecta" style used by the app logs.
@@ -53,17 +47,7 @@ AUTH_FAIL_REGEX = re.compile(
     r"\"\s+(?:401|403)\b|status=(?:401|403)\b",
     re.IGNORECASE,
 )
-# sshd logs every failed password twice in auth.log: once from PAM
-# ("pam_unix(sshd:auth): authentication failure") and once from sshd itself
-# ("Failed password for ..."), plus a "PAM N more authentication failures"
-# summary when the connection closes. Counting all of them would inflate the
-# number of attempts, so these PAM copies are skipped.
-SSHD_PAM_DUPLICATE_REGEX = re.compile(
-    r"pam_unix\(sshd:auth\): authentication failure|\bPAM \d+ more authentication failures?",
-    re.IGNORECASE,
-)
-# Any sshd method: password, publickey, keyboard-interactive/pam (2FA), gssapi...
-AUTH_OK_REGEX = re.compile(r"accepted [\w/-]+ for|login (?:ok|success)", re.IGNORECASE)
+AUTH_OK_REGEX = re.compile(rf"{SSHD_ACCEPTED}|login (?:ok|success)", re.IGNORECASE)
 ERROR_REGEX = re.compile(r"\bERROR\b", re.IGNORECASE)
 
 DEMO_LOG = "\n".join(
@@ -94,28 +78,15 @@ def source_ip(line):
     m = SOURCE_IP_REGEX.search(line)
     candidates = [m.group(1)] if m else IP_REGEX.findall(line)
     for candidate in candidates:
-        try:
-            return ipaddress.ip_address(candidate)
-        except ValueError:      # rejects values like 999.999.999.999
-            continue
+        if ip := valid_ip(candidate):      # skips values like 999.999.999.999
+            return ip
     return None
 
 
-def target_user(line):
-    m = SSHD_USER_REGEX.search(line) or KV_USER_REGEX.search(line)
-    return m.group(1).lower() if m else None
+target_user = find_user
 
 
-def parse_timestamp(line, year):
-    if m := ISO_TS_REGEX.search(line):
-        return datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S")
-    if m := SYSLOG_TS_REGEX.search(line):
-        return datetime.strptime(f"{year} {m.group(1)} {m.group(2)} {m.group(3)}",
-                                 "%Y %b %d %H:%M:%S")
-    return None
-
-
-def parse_line(line, auth_only, year):
+def parse_line(line, auth_only, year=None):
     """Return {'kind': 'fail'|'ok', 'ip', 'user', 'time'} if relevant, otherwise None."""
     if SSHD_PAM_DUPLICATE_REGEX.search(line):
         return None
@@ -129,24 +100,11 @@ def parse_line(line, auth_only, year):
             "time": parse_timestamp(line, year)}
 
 
-def read_events(lines, auth_only, year):
+def read_events(lines, auth_only, year=None):
     return [ev for ev in (parse_line(line, auth_only, year) for line in lines) if ev]
 
 
 # --- Analysis ----------------------------------------------------------------
-def max_in_window(times, window):
-    """Maximum number of events in any interval of length `window` (sliding window)."""
-    times = sorted(t for t in times if t is not None)
-    best, left = (0, None, None), 0
-    for right, t in enumerate(times):
-        while t - times[left] > window:
-            left += 1
-        n = right - left + 1
-        if n > best[0]:
-            best = (n, times[left], t)
-    return best
-
-
 def ip_type(ip):
     if ip.is_global:
         return "public"
@@ -214,8 +172,7 @@ def build_parser():
     p.add_argument("--window", type=int, default=5, help="Window size in minutes (default 5)")
     p.add_argument("--all-errors", action="store_true",
                    help="Count any ERROR line, not just authentication failures")
-    p.add_argument("--year", type=int, default=datetime.now().year,
-                   help="Year for syslog timestamps, which don't include one (default: current)")
+    add_year_argument(p)
     p.add_argument("--top", type=int, default=10, help="Show only the top N per section (default 10)")
     p.add_argument("--json-output", help="Write results to a JSON file (SIEM-friendly)")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -224,22 +181,13 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging(args.verbose)
 
     if args.demo:
         log.info("Demo mode: using built-in sample log")
         lines = DEMO_LOG.splitlines()
-    else:
-        src = Path(args.log)
-        if not src.is_file():
-            log.error("Log file not found: %s", src)   # never invent data
-            return EXIT_ERROR
-        try:
-            lines = src.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except OSError as e:
-            log.error("Could not read %s: %s", src, e)
-            return EXIT_ERROR
+    elif (lines := read_log_lines(args.log, log)) is None:
+        return EXIT_ERROR
 
     events = read_events(lines, not args.all_errors, args.year)
     fails = [e for e in events if e["kind"] == "fail"]
@@ -263,7 +211,7 @@ def main(argv=None):
 
     if args.json_output:
         try:
-            Path(args.json_output).write_text(json.dumps(output, indent=2), encoding="utf-8")
+            write_json(args.json_output, output)
             log.info("Results saved to %s", args.json_output)
         except OSError as e:
             log.error("Could not write output: %s", e)

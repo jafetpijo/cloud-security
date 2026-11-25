@@ -1,6 +1,8 @@
 """Tests for the exfiltration detector. Run with:  python3 -m unittest -v"""
+import tempfile
 import unittest
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import detector_exfiltracion as x
 
@@ -47,6 +49,23 @@ class TestAnalyze(unittest.TestCase):
         sev = {r["ip"]: r["severity"] for r in results}
         self.assertEqual(sev, {"203.0.113.7": "HIGH", "192.168.1.50": "MEDIUM",
                                "198.51.100.20": "OK", "192.168.1.100": "OK"})
+
+
+class TestAuthorized(unittest.TestCase):
+    LINES = ["2026-11-17 10:00:00 download ip=10.1.2.3 bytes=52428800",
+             "2026-11-17 10:00:00 download ip=203.0.113.7 bytes=52428800"]
+
+    def test_networks_can_be_authorized(self):
+        results = x.analyze(x.read_transfers(self.LINES), ["10.1.2.0/24"], 20, 100, 60)
+        auth = {r["ip"]: r["authorized"] for r in results}
+        self.assertEqual(auth, {"10.1.2.3": True, "203.0.113.7": False})
+
+    def test_invalid_entry_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "access.log"
+            log_file.write_text("\n".join(self.LINES) + "\n")
+            self.assertEqual(x.main(["--log", str(log_file), "--authorized-ips", "10.0.0.999"]),
+                             x.EXIT_ERROR)
 
 
 class TestMain(unittest.TestCase):

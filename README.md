@@ -63,8 +63,8 @@ More examples:
 python3 templates/detector_acceso_ips_nuevas.py --log normal.log --learn
 python3 templates/detector_acceso_ips_nuevas.py --log today.log
 
-# Exfiltration with custom limits
-python3 templates/detector_exfiltracion.py --log access.log --authorized-ips 192.168.1.50 --limit-unauthorized 20
+# Exfiltration with custom limits (authorized IPs can be single IPs or CIDR networks)
+python3 templates/detector_exfiltracion.py --log access.log --authorized-ips 192.168.1.50,10.0.0.0/24 --limit-unauthorized 20
 
 # Folder growth: run on a schedule (e.g. cron), alerts on 100+ MB of change since the last run
 python3 templates/detector_crecimiento.py --path ./carpetas_empresa --threshold 100
@@ -72,11 +72,24 @@ python3 templates/detector_crecimiento.py --path ./carpetas_empresa --threshold 
 
 Run any tool with `-h` to see all its options.
 
+Syslog timestamps (`Nov 17 10:00:00`) have no year. By default the tools use
+the current year, or the previous one when that would put a date in the future
+(a December log read in January). Pass `--year` to set it explicitly.
+
+`crear_auditor.sh` sets up a Linux `auditor` account and group and restricts a
+log file to that group (mode 640):
+
+```bash
+./crear_auditor.sh /var/log/app.log
+GRUPO=soc USUARIO=analista ./crear_auditor.sh /var/log/app.log
+```
+
 ## Supported Log Formats
 
 | Source | Example |
 |---|---|
 | Linux `auth.log` (sshd) | `Nov 17 10:00:05 web01 sshd[99]: Failed password for root from 203.0.113.7 port 22` |
+| Linux `auth.log` (sudo) | `Nov 17 10:00:05 web01 sudo: ana : TTY=pts/0 ; USER=root ; COMMAND=/bin/chmod 777 /srv` |
 | App logs, key=value | `2026-11-17 10:00:00 LOGIN OK user=ana ip=192.168.1.20` |
 | App logs, Spanish | `2026-11-01 10:00:00 DOWNLOAD usuario=juan tamaño=52428800 ip=10.0.0.99` |
 | Web access logs | `203.0.113.7 - - [17/Nov/2026:10:00:00 -0600] "GET /backup.zip HTTP/1.1" 200 5242880` |
@@ -103,9 +116,11 @@ Designed to be used in scripts and scheduled jobs:
 
 ```
 cloud-security/
-├── logs/          # sample logs (ignored by git)
-├── reportes/      # generated reports (ignored by git)
+├── crear_auditor.sh   # Linux auditor account + log file permissions
+├── logs/              # sample logs (ignored by git)
+├── reportes/          # generated reports (ignored by git)
 └── templates/
+    ├── common.py                       + test_common.py   (shared helpers)
     ├── resumen_diario.py               + test_resumen_diario.py
     ├── clasificador.py                 + test_clasificador_eventos.py
     ├── analizador_fuerza_bruta.py      + test_analizador_fuerza_bruta.py
@@ -117,15 +132,36 @@ cloud-security/
 
 ## Tests
 
-Every tool has unit tests (66 in total). Run them from the `templates` folder:
+Every tool has unit tests (80 in total). Run them from the `templates` folder:
 
 ```bash
 cd templates
 python3 -m unittest -v
 ```
 
+## Creating a New Detector
+
+The tools are meant to be copied as templates. To add a detector:
+
+1. Copy the closest tool (for example `auditor_permisos.py` for anything that
+   groups events by user, or `detector_exfiltracion.py` for volumes per IP) and
+   its test file.
+2. Keep the structure: `DEMO_LOG`, `parse_line()`, `analyze()`, `build_parser()`
+   and `main()` returning `EXIT_OK` / `EXIT_ALERTS` / `EXIT_ERROR`.
+3. Reuse `common.py` instead of writing the basics again: `read_log_lines()`,
+   `parse_timestamp()`, `valid_ip()`, `find_user()`, `max_in_window()`,
+   `write_json()`, `setup_logging()`, `add_year_argument()`. If a new log format
+   needs a fix there, every tool gets it.
+4. Change only the rules: the regexes, the grouping key and the severities.
+   Add the MITRE ATT&CK technique to the docstring.
+5. Put realistic lines in `DEMO_LOG` and in the tests: copy them from a real log
+   (with IPs replaced by the documentation ranges 192.0.2.0/24, 198.51.100.0/24,
+   203.0.113.0/24). Synthetic lines hide parsing bugs.
+6. Run `python3 -m unittest -v` from `templates/` and `--demo` before using it.
+
 ## Tech Highlights
 
+- Shared helpers in `common.py`, so parsing fixes reach every tool
 - Python 3.9+, standard library only (`argparse`, `re`, `logging`, `ipaddress`, `collections`, `datetime`, `pathlib`, `unittest`)
 - Sliding time window detection: events within N minutes, not totals over the whole log
 - Same structure in every tool: `--demo` mode, consistent exit codes, JSON output for SIEM ingestion
@@ -139,6 +175,8 @@ python3 -m unittest -v
 - Detections are heuristics for learning and small environments, not a replacement for a SIEM or EDR
 - CloudTrail is supported by event name in text logs; native CloudTrail JSON is not parsed yet
 - IPv6 addresses are not extracted yet
+- Thresholds are defaults, not tuned values: adjust them with real logs from
+  your environment before relying on the alerts
 
 ## Roadmap
 

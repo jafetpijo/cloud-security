@@ -44,6 +44,17 @@ class TestParseLine(unittest.TestCase):
                 ev = a.parse_line(f"2026-06-01 10:00:00 user=x action=chmod {options} 777 /var/www")
                 self.assertEqual((ev["detail"], ev["risk"]), ("777", "world-writable"))
 
+    def test_sudo_line_actor_is_not_target_user(self):
+        # Old bug: sudo lines had no user (or took "USER=root", the target, as the actor)
+        ev = a.parse_line("Jun  1 10:26:00 web01 sudo:    Carlos : TTY=pts/0 ; PWD=/home/carlos ; "
+                          "USER=root ; COMMAND=/usr/bin/chmod 4755 /tmp/sh", 2026)
+        self.assertEqual((ev["user"], ev["risk"]), ("carlos", "setuid/setgid bit"))
+        self.assertEqual(ev["time"], datetime(2026, 6, 1, 10, 26))
+
+    def test_sudo_with_pid(self):
+        ev = a.parse_line("Jun  1 10:26:00 h sudo[812]: ana : COMMAND=/bin/chmod 777 /srv", 2026)
+        self.assertEqual(ev["user"], "ana")
+
     def test_deleting_public_access_block_is_risky(self):
         self.assertTrue(a.parse_line("user=x action=DeleteBucketPublicAccessBlock")["risk"])
 

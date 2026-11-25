@@ -17,17 +17,17 @@ Exit codes: 0 = no alerts, 1 = alerts found, 2 = error.
 """
 import argparse
 import ipaddress
-import json
 import logging
 import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
-from pathlib import Path
+
+from common import (EXIT_ALERTS, EXIT_ERROR, EXIT_OK, ISO_TS_REGEX, read_log_lines,
+                    setup_logging, valid_ip, write_json)
 
 log = logging.getLogger("exfiltration")
 
-EXIT_OK, EXIT_ALERTS, EXIT_ERROR = 0, 1, 2
 MB = 1024 * 1024
 
 WEB_REGEX = re.compile(
@@ -35,7 +35,6 @@ WEB_REGEX = re.compile(
 APP_IP_REGEX = re.compile(r"\bip=([0-9.]+)", re.IGNORECASE)
 # bytes=, size=, or the Spanish tamaño= / tamano= used by the app logs
 APP_BYTES_REGEX = re.compile(r"\b(?:bytes|size|tama[ñn]o)=(\d+)", re.IGNORECASE)
-ISO_TS_REGEX = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})")
 
 DEMO_AUTHORIZED = "192.168.1.50,192.168.1.100"
 DEMO_LOG = "\n".join(
@@ -68,9 +67,7 @@ def parse_line(line):
         ip, size = m_ip.group(1), int(m_bytes.group(1))
         m_ts = ISO_TS_REGEX.search(line)
         ts = datetime.strptime(f"{m_ts.group(1)} {m_ts.group(2)}", "%Y-%m-%d %H:%M:%S") if m_ts else None
-    try:
-        ip = ipaddress.ip_address(ip)       # rejects values like 999.1.1.1
-    except ValueError:
+    if (ip := valid_ip(ip)) is None:       # rejects values like 999.1.1.1
         return None
     return ip, ts, size
 
@@ -102,12 +99,20 @@ def max_bytes_in_window(transfers, window):
     return best[0] + untimed, best[1], best[2]
 
 
+def parse_authorized(entries):
+    """IPs or networks ('10.0.0.5', '10.0.0.0/24') -> list of ip_network.
+    Comparing addresses, not text, lets a whole subnet be authorized at once.
+    Raises ValueError for an invalid entry, so a typo never silently authorizes nothing."""
+    return [ipaddress.ip_network(e.strip(), strict=False) for e in entries if e.strip()]
+
+
 def analyze(by_ip, authorized, limit_unauth_mb, limit_auth_mb, window_min):
     window = timedelta(minutes=window_min)
+    networks = parse_authorized(authorized)
     results = []
     for ip, transfers in by_ip.items():
         peak, start, end = max_bytes_in_window(transfers, window)
-        is_auth = str(ip) in authorized
+        is_auth = any(ip.version == net.version and ip in net for net in networks)
         limit_mb = limit_auth_mb if is_auth else limit_unauth_mb
         over = peak > limit_mb * MB
         if over and not is_auth:
@@ -134,7 +139,7 @@ def build_parser():
     p.add_argument("--log", default="logs/access.log", help="Path to the access log")
     p.add_argument("--demo", action="store_true", help="Run on a built-in sample log (ignores --log)")
     p.add_argument("--authorized-ips", default="192.168.1.50,192.168.1.100",
-                   help="Comma-separated IPs allowed to move more data")
+                   help="Comma-separated IPs or networks (CIDR) allowed to move more data")
     p.add_argument("--limit-unauthorized", type=float, default=20,
                    help="MB allowed per window for other IPs (default 20)")
     p.add_argument("--limit-authorized", type=float, default=100,
@@ -147,25 +152,22 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging(args.verbose)
 
     if args.demo:
         log.info("Demo mode: using built-in sample log")
         lines, authorized_text = DEMO_LOG.splitlines(), DEMO_AUTHORIZED
+    elif (lines := read_log_lines(args.log, log)) is None:
+        return EXIT_ERROR
     else:
-        src = Path(args.log)
-        if not src.is_file():
-            log.error("Log file not found: %s", src)   # never invent data
-            return EXIT_ERROR
-        try:
-            lines = src.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except OSError as e:
-            log.error("Could not read %s: %s", src, e)
-            return EXIT_ERROR
         authorized_text = args.authorized_ips
 
-    authorized = {ip.strip() for ip in authorized_text.split(",") if ip.strip()}
+    authorized = authorized_text.split(",")
+    try:
+        parse_authorized(authorized)
+    except ValueError as e:
+        log.error("Invalid --authorized-ips entry: %s", e)
+        return EXIT_ERROR
     by_ip = read_transfers(lines)
     if not by_ip:
         log.info("No downloads found in the log.")
@@ -181,8 +183,7 @@ def main(argv=None):
 
     if args.json_output:
         try:
-            Path(args.json_output).write_text(json.dumps({"results": results}, indent=2),
-                                              encoding="utf-8")
+            write_json(args.json_output, {"results": results})
             log.info("Results saved to %s", args.json_output)
         except OSError as e:
             log.error("Could not write output: %s", e)
